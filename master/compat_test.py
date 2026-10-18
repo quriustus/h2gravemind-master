@@ -68,20 +68,33 @@ try:
             return out
 
     checked = 0
-    for asker in ("127.0.0.1", "10.99.0.50", "198.51.100.200"):  # loopback, private and outside browsers
-        for version in (16, 17, 99):
-            nonce = 0x1122334455667700 + version
-            for pair in (("old", "new", "new --ipv4-only"), ("old --public-ip", "new --public-ip")):
-                got = {name: replies(masters[name][1], asker, version, nonce) for name in pair}
-                ref = got[pair[0]]
-                assert ref, (asker, version, "no reply")
-                for name in pair[1:]:
-                    assert got[name] == ref, "%s differs from %s: asker %s version %d\n%r\n%r" % (
-                        name, pair[0], asker, version, [p[:24] for p in got[name]], [p[:24] for p in ref])
-                checked += 1
-                print("ok: asker %-15s protocol %-3d %-36s %d packets, %4d bytes, %d games: identical" % (
-                    asker, version, " = ".join(pair), len(ref), sum(map(len, ref)), sum(p[14] for p in ref)))
-    print("ok: %d list replies byte for byte identical (current game's request; IPv6 games registered too)" % checked)
+
+    def compare(askers, label):
+        global checked
+        for asker in askers:  # loopback, private and outside browsers
+            for version in (16, 17, 99):
+                nonce = 0x1122334455667700 + version
+                for pair in (("old", "new", "new --ipv4-only"), ("old --public-ip", "new --public-ip")):
+                    got = {name: replies(masters[name][1], asker, version, nonce) for name in pair}
+                    ref = got[pair[0]]
+                    assert ref, (asker, version, "no reply")
+                    for name in pair[1:]:
+                        assert got[name] == ref, "%s differs from %s: asker %s version %d\n%r\n%r" % (
+                            name, pair[0], asker, version, [p[:24] for p in got[name]], [p[:24] for p in ref])
+                    checked += 1
+                    print("ok: %s asker %-15s protocol %-3d %-36s %d packets, %4d bytes, %d games: identical" % (
+                        label, asker, version, " = ".join(pair), len(ref), sum(map(len, ref)), sum(p[14] for p in ref)))
+
+    compare(("127.0.0.1", "10.99.0.50", "198.51.100.200"), "")
+    # unlist (type 24) of two IPv4 games and an IPv6 one in every master: the lists stay identical
+    for i in (1, 4, 11):
+        for name, (_, port) in masters.items():
+            if i < len(games) or (name.startswith("new") and "ipv4-only" not in name):
+                socks[i].sendto(header(24, 0, 16), ("127.0.0.1" if i < len(games) else "::1", port))
+    time.sleep(0.5)
+    compare(("127.0.0.5", "10.99.0.51", "198.51.100.201"), "after unlist:")
+    print("ok: %d list replies byte for byte identical (current game's request; IPv6 games registered too; before "
+          "and after unlist)" % checked)
 finally:
     for p in procs:
         p.terminate()

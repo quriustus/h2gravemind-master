@@ -1,10 +1,11 @@
 #!/bin/sh
 # IPv6 tests in a throwaway container (Docker, nothing installed on the machine): builds the master before this
-# change (git commit, default 6ef4032) and after it with g++, then runs smoke_test.py (IPv4, IPv6, caps and rate
-# limits) and compat_test.py (the current game's list byte for byte). From the repository root:
+# change (git commit, default dd4943d) and after it with g++, then runs smoke_test.py (IPv4, IPv6, unlist, caps and
+# rate limits) and compat_test.py (the current game's list byte for byte, before and after unlist). From the
+# repository root:
 #   sh master/test_ipv6.sh [base commit]
 set -e
-base=${1:-6ef4032}
+base=${1:-dd4943d}
 old=$(mktemp -d)
 git archive "$base" src master/main.cpp | tar -x -C "$old"
 docker run --rm --cap-add NET_ADMIN \
@@ -18,9 +19,9 @@ docker run --rm --cap-add NET_ADMIN \
         ip route add local 10.99.0.0/16 dev lo
         g++ -O2 -std=c++17 -Wall -Wextra -o /tmp/old /old/master/main.cpp /old/src/master_core.cpp -pthread
         g++ -O2 -std=c++17 -Wall -Wextra -Werror -o /tmp/new /src/master/main.cpp /src/src/master_core.cpp -pthread
-        /tmp/new --port 11770 > /tmp/new.log & master=$!
+        /tmp/new --port 11791 > /tmp/new.log & master=$!
         sleep 0.5
-        python3 /src/master/smoke_test.py 127.0.0.1 11770 --v6 ::1 --limits
+        python3 /src/master/smoke_test.py 127.0.0.1 11791 --v6 ::1 --limits
         python3 /src/master/compat_test.py /tmp/old /tmp/new
         kill $master
         # replies from the address asked: the browser on another of the machine'"'"'s addresses

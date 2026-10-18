@@ -165,6 +165,25 @@ if host6:
     assert len(got) == 1 and got[0][5] == 32 and got[0][14] == 0, got
     print("ok: IPv6 asker without the flag gets type 10; unknown flag bits ignored; other version empty (type 32)")
 
+    # unlist (type 24): only the sender's own entry goes (an unlist from another port of the same address removes
+    # nothing), an IPv6 game leaves the type 32 list at once, an IPv4 game too
+    time.sleep(10.5)  # the list requests above used up this window's limit for these askers
+    same_addr = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+    same_addr.bind((game6.getsockname()[0], 0))
+    same_addr.sendto(header(24, 0, V), dest6)
+    time.sleep(0.3)
+    got = entries(ask(udp6(), dest6, V, 46, flags=1))
+    assert sorted((e[0], e[2]) for e in got) == sorted([(4, game4.getsockname()[1]), (6, game6_port)]), got
+    game6.sendto(header(24, 0, V), dest6)
+    time.sleep(0.3)
+    got = entries(ask(udp6(), dest6, V, 47, flags=1))
+    assert [(e[0], e[2]) for e in got] == [(4, game4.getsockname()[1])], got
+    game4.sendto(header(24, 0, V), dest4)
+    time.sleep(0.3)
+    assert entries(ask(udp4(), dest4, V, 48, flags=1)) == [], "the IPv4 game must leave the type 32 list"
+    print("ok: unlist (type 24): another port of the same address removes nothing; the IPv6 game and then the IPv4 "
+          "game leave the type 32 list at once")
+
 
 # --- caps and rate limits (Linux, test prefixes bindable) ---------------------------------------------------------
 
