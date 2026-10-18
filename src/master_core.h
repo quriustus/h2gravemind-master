@@ -5,6 +5,12 @@
 // protocol version (type 10 replies: u8 count, then {u32 ipv4, u16 port, info} entries, at most 2 per packet). So
 // masters run by others keep working when the game's protocol changes.
 // Header (packed, little endian): u32 magic "H2LB", u8 version, u8 type, u64 nonce (echoed in the reply).
+// IPv4 and IPv6 on one socket (IPv4 arrives as ::ffff:a.b.c.d and is handled exactly as on an IPv4-only master).
+// A list request carrying a flags byte after the header with bit 0 set gets type 32 replies instead: u8 count, then
+// {u8 family (4 or 6), IPv4 (4 bytes) or IPv6 (16 bytes), u16 port, u16 info size, info} entries, IPv4 and IPv6
+// games mixed (32: clear of the game's own message types, which share this header). Plain type 9 requests (the
+// current game) get the type 10 list of before, IPv4 games only; masters without this change ignore the flags byte
+// and answer type 10, so a new browser works with any master.
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -21,6 +27,7 @@ struct MasterOptions
     std::function<bool()> quit;               // polled; true stops the master
     std::function<void(const std::string&)> log;  // one line, no newline
     bool printList = true;                    // print the registered games when the list changes
+    bool ipv6 = true;                         // false: IPv4 socket only (as before); also the fallback without IPv6
 };
 
 int RunMaster(const MasterOptions& options);

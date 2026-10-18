@@ -1,6 +1,6 @@
 // Standalone master server for Halo 2 Project Gravemind (Linux / Docker; builds on Windows too). The game's own
 // h2gravemind.exe --master runs the same core (src/master_core.cpp).
-// Usage: h2gravemind-master [--port 11770] [--public-ip a.b.c.d]
+// Usage: h2gravemind-master [--port 11770] [--public-ip a.b.c.d] [--ipv4-only]
 #include "../src/master_core.h"
 
 #include <atomic>
@@ -42,9 +42,11 @@ int main(int argc, char** argv)
             }
             o.publicIp = addr.s_addr;
         }
+        else if (a == "--ipv4-only")
+            o.ipv6 = false;
         else
         {
-            std::fprintf(stderr, "usage: %s [--port 11770] [--public-ip a.b.c.d]\n", argv[0]);
+            std::fprintf(stderr, "usage: %s [--port 11770] [--public-ip a.b.c.d] [--ipv4-only]\n", argv[0]);
             return 2;
         }
     }

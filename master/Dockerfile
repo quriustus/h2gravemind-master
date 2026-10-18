@@ -1,6 +1,7 @@
 # Halo 2 Project Gravemind master server (UDP 11770). Build from the repository root:
 #   docker build -f master/Dockerfile -t h2gravemind-master .
-#   docker run -d --name h2gravemind-master --restart unless-stopped -p 11770:11770/udp h2gravemind-master
+#   docker run -d --name h2gravemind-master --restart unless-stopped --network host h2gravemind-master
+# (--network host so IPv6 games keep their address; see master/README.md)
 FROM debian:bookworm-slim AS build
 RUN apt-get update && apt-get install -y --no-install-recommends g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
