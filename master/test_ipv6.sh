@@ -1,8 +1,8 @@
 #!/bin/sh
 # IPv6 tests in a throwaway container (Docker, nothing installed on the machine): builds the master before this
 # change (git commit, default dd4943d) and after it with g++, then runs smoke_test.py (IPv4, IPv6, unlist, caps and
-# rate limits) and compat_test.py (the current game's list byte for byte, before and after unlist). From the
-# repository root:
+# rate limits), compat_test.py (the current game's list byte for byte, before and after unlist) and nat_test.py
+# (introductions for NAT traversal, their limits, replies from the address asked). From the repository root:
 #   sh master/test_ipv6.sh [base commit]
 set -e
 base=${1:-dd4943d}
@@ -23,6 +23,11 @@ docker run --rm --cap-add NET_ADMIN \
         sleep 0.5
         python3 /src/master/smoke_test.py 127.0.0.1 11791 --v6 ::1 --limits
         python3 /src/master/compat_test.py /tmp/old /tmp/new
+        python3 /src/master/nat_test.py 127.0.0.1 11791 --v6 ::1 --limits
+        kill $master
+        /tmp/new --port 11792 --public-ip 203.0.113.5 > /tmp/new3.log & master=$!
+        sleep 0.5
+        python3 /src/master/nat_test.py 127.0.0.1 11792 --public-ip 203.0.113.5
         kill $master
         # replies from the address asked: the browser on another of the machine'"'"'s addresses
         ip -6 addr add 2001:db8:ffff::10/128 dev lo
@@ -30,5 +35,6 @@ docker run --rm --cap-add NET_ADMIN \
         /tmp/new --port 11771 > /tmp/new2.log & master=$!
         sleep 0.5
         python3 /src/master/smoke_test.py 127.0.0.1 11771 --v6 2001:db8:ffff::20 --v6-from 2001:db8:ffff::10
+        python3 /src/master/nat_test.py 127.0.0.1 11771 --v6 2001:db8:ffff::20 --v6-from 2001:db8:ffff::10
         kill $master'
 rm -rf "$old"
