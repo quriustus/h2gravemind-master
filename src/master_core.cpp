@@ -49,6 +49,17 @@ namespace
     constexpr int kListBurst = 6;             // list requests per source address and window (amplification guard)
     constexpr int kListBurst48 = 4 * kListBurst;
     constexpr int64_t kListWindowMs = 10000;
+    // NAT traversal (rendezvous): a player who wants to join a listed game asks from its game socket (40), so we see
+    // its public address; we pass that address to the game's host (41) over the path its heartbeats keep open, and
+    // the host sends a few small packets there (the game's 43, not ours) that open its NAT / firewall toward the
+    // player. The player gets a reply (42) with its own public address. A host also hears its own public address
+    // from us (46) at most once a minute. Nothing is stored per introduction.
+    constexpr uint8_t kIntroRequest = 40, kIntroduce = 41, kIntroReply = 42, kSeen = 46;
+    constexpr size_t kIntroRequestSize = 128;  // fixed: larger than all it causes (41 + 42 <= 67 bytes)
+    constexpr uint8_t kIntroOk = 0, kIntroUnknown = 1, kIntroLimited = 2;
+    constexpr int kIntroBurst = 10, kIntroBurst48 = 4 * kIntroBurst;  // per source and window, like list requests
+    constexpr int kIntroPerGame = 30;  // per game and window: one host can't be made to send at the whole world
+    constexpr int64_t kSeenEveryMs = 60000;
 
     int64_t NowMs()
     {
@@ -286,14 +297,70 @@ namespace
         uint8_t version = 0;
         std::vector<uint8_t> info;
         int64_t lastSeen = 0;
+        Arrival arrival;          // which of our IPv6 addresses its heartbeats come to: what we send it leaves from it
+        int64_t lastSeenSent = 0; // when we last told it its public address (46)
+        std::pair<int64_t, int> intros{};  // introductions to it: window start, count
     };
 
-    // One window of list requests per key: window start, count. True while within the burst.
+    // One window of requests per key: window start, count. The count in the window, this request included.
+    int Count(std::pair<int64_t, int>& window, int64_t now)
+    {
+        auto& [start, count] = window;
+        if (now - start > kListWindowMs) start = now, count = 0;
+        return ++count;
+    }
+
+    // True while within the burst.
     bool Allow(std::map<Address, std::pair<int64_t, int>>& windows, const Address& key, int64_t now, int burst)
     {
-        auto& [start, count] = windows[key];
-        if (now - start > kListWindowMs) start = now, count = 0;
-        return ++count <= burst;
+        return Count(windows[key], now) <= burst;
+    }
+
+    // Address entry, as in the type 32 list: u8 family (4 / 6), 4 or 16 address bytes, u16 port (network byte order)
+    void WriteEntry(std::vector<uint8_t>& out, const Address& a)
+    {
+        out.push_back(a.v6 ? 6 : 4);
+        const auto* ip = a.v6 ? a.ip6.data() : reinterpret_cast<const uint8_t*>(&a.ip4);
+        out.insert(out.end(), ip, ip + (a.v6 ? 16 : 4));
+        const auto* port = reinterpret_cast<const uint8_t*>(&a.port);
+        out.insert(out.end(), port, port + 2);
+    }
+
+    bool ReadEntry(const uint8_t* p, size_t size, Address& a)
+    {
+        if (size < 1 || (p[0] != 4 && p[0] != 6) || size < (p[0] == 6 ? 19u : 7u)) return false;
+        a = {};
+        a.v6 = p[0] == 6;
+        if (a.v6) std::memcpy(a.ip6.data(), p + 1, 16);
+        else std::memcpy(&a.ip4, p + 1, 4);
+        std::memcpy(&a.port, p + (a.v6 ? 17 : 5), 2);
+        return a.port != 0;
+    }
+
+    // sockaddr for our socket (an IPv4 address on the dual-stack socket as ::ffff:a.b.c.d); 0 = can't send there
+    SockLen ToSockaddr(const Address& a, bool dualStack, sockaddr_storage& out)
+    {
+        out = {};
+        if (dualStack)
+        {
+            auto& in6 = reinterpret_cast<sockaddr_in6&>(out);
+            in6.sin6_family = AF_INET6;
+            in6.sin6_port = a.port;
+            if (a.v6)
+                std::memcpy(in6.sin6_addr.s6_addr, a.ip6.data(), 16);
+            else
+            {
+                in6.sin6_addr.s6_addr[10] = in6.sin6_addr.s6_addr[11] = 0xFF;
+                std::memcpy(in6.sin6_addr.s6_addr + 12, &a.ip4, 4);
+            }
+            return sizeof(sockaddr_in6);
+        }
+        if (a.v6) return 0;
+        auto& in = reinterpret_cast<sockaddr_in&>(out);
+        in.sin_family = AF_INET;
+        in.sin_port = a.port;
+        in.sin_addr.s_addr = a.ip4;
+        return sizeof(sockaddr_in);
     }
 }
 
@@ -359,6 +426,7 @@ int RunMaster(const MasterOptions& options)
 
     std::map<Address, Game> games;
     std::map<Address, std::pair<int64_t, int>> listRequests, listRequests48;  // source (/48) -> window start, count
+    std::map<Address, std::pair<int64_t, int>> introRequests, introRequests48;
     size_t lastCount = SIZE_MAX;
     int64_t lastSweep = NowMs();
 
@@ -404,6 +472,68 @@ int RunMaster(const MasterOptions& options)
                     it->second.version = version;
                     it->second.info.assign(buf + kHeaderSize, buf + n);
                     it->second.lastSeen = now;
+                    it->second.arrival = key.v6 ? arrival : Arrival{};
+                    if (now - it->second.lastSeenSent >= kSeenEveryMs)
+                    {
+                        // its public address as we see it (a new game ignores nothing here; an old one ignores 46):
+                        // with two masters a host learns whether its NAT keeps one public port for both
+                        it->second.lastSeenSent = now;
+                        std::vector<uint8_t> seen(buf, buf + kHeaderSize);
+                        seen[5] = kSeen;
+                        WriteEntry(seen, key);
+                        Send(s, seen, from, fromLen, it->second.arrival);
+                    }
+                }
+                else if (type == kIntroRequest)
+                {
+                    // exactly 128 bytes: u8 flags, the game's entry as listed, zero padding
+                    Address want;
+                    if (n != static_cast<int>(kIntroRequestSize) || !ReadEntry(buf + kHeaderSize + 1, n - kHeaderSize - 1, want))
+                        continue;
+                    const int asked = Count(introRequests[Prefix(key, 64)], now);
+                    const int asked48 = key.v6 ? Count(introRequests48[Prefix(key, 48)], now) : 0;
+                    if (asked > kIntroBurst + 1 || asked48 > kIntroBurst48 + 1) continue;  // told once, then silence
+                    auto reply = [&](uint8_t status) {
+                        std::vector<uint8_t> r(buf, buf + kHeaderSize);  // magic, the asker's version, its nonce
+                        r[5] = kIntroReply;
+                        r.push_back(status);
+                        WriteEntry(r, key);
+                        Send(s, r, from, fromLen, key.v6 ? arrival : Arrival{});
+                    };
+                    if (asked > kIntroBurst || asked48 > kIntroBurst48)
+                    {
+                        reply(kIntroLimited);
+                        continue;
+                    }
+                    // Registered games of the asker's protocol version and address family (a player behind IPv4
+                    // can't use an introduction to an IPv6 game, nor the other way round). A game on our own network
+                    // is listed under our public IPv4: found by its port among the private entries.
+                    auto game = games.find(want);
+                    if (game != games.end() && game->second.version != version) game = games.end();
+                    if (game == games.end() && !want.v6 && publicIp && want.ip4 == publicIp)
+                        for (auto g = games.begin(); g != games.end() && game == games.end(); ++g)
+                            if (!g->first.v6 && PrivateAddress(g->first.ip4) && g->first.port == want.port &&
+                                g->second.version == version)
+                                game = g;
+                    if (game == games.end() || game->first.v6 != key.v6)
+                    {
+                        reply(kIntroUnknown);
+                        continue;
+                    }
+                    if (Count(game->second.intros, now) > kIntroPerGame)
+                    {
+                        reply(kIntroLimited);
+                        continue;
+                    }
+                    // To the game at the address its heartbeats come from, with the address the request came from
+                    // (never one written in the request: nobody can aim a host at a third party)
+                    std::vector<uint8_t> intro(buf, buf + kHeaderSize);  // the player's nonce: the host's punches carry it
+                    intro[5] = kIntroduce;
+                    WriteEntry(intro, key);
+                    sockaddr_storage to;
+                    if (const SockLen toLen = ToSockaddr(game->first, dualStack, to))
+                        Send(s, intro, to, toLen, game->second.arrival);
+                    reply(kIntroOk);
                 }
                 else if (type == kUnlist)
                 {
@@ -483,7 +613,7 @@ int RunMaster(const MasterOptions& options)
             lastSweep = now;
             for (auto it = games.begin(); it != games.end();)
                 it = now - it->second.lastSeen > kExpireMs ? games.erase(it) : std::next(it);
-            for (auto* windows : {&listRequests, &listRequests48})
+            for (auto* windows : {&listRequests, &listRequests48, &introRequests, &introRequests48})
                 for (auto it = windows->begin(); it != windows->end();)
                     it = now - it->second.first > kListWindowMs ? windows->erase(it) : std::next(it);
             if (games.size() != lastCount)

@@ -66,7 +66,8 @@ Without Docker: `g++ -O2 -std=c++17 -o h2gravemind-master master/main.cpp src/ma
 
 `sh master/test_ipv6.sh` (Docker) builds the master before and after the IPv6 change in a throwaway container and
 runs the smoke test with the IPv6 caps and rate limits, plus `master/compat_test.py`: every list reply the current
-game can get, compared byte for byte between the two.
+game can get, compared byte for byte between the two, and `master/nat_test.py`: introductions (types 40-42, 46),
+their sizes and limits, and that IPv6 replies and introductions leave from the address the other side wrote to.
 
 ## Protocol
 
@@ -91,3 +92,32 @@ Little endian, packed. Header (14 bytes): `u32 magic 0x424C3248 ("H2LB")`, `u8 p
   (instead of 45 s after its last heartbeat), from the type 10 and the type 32 lists alike. Only the entry of
   the address and port it comes from (IPv4 or IPv6), as for heartbeats. Masters without it simply ignore the
   message.
+
+### NAT traversal (introductions)
+
+A player can host without opening a port: the master introduces the player who wants to join to the host, over
+the path the host's heartbeats keep open (they leave from the game's socket every 15 s), and the host sends a few
+small packets to the player that open its NAT / firewall. Entries below are laid out as in type 32: `u8 family (4
+or 6)`, 4 or 16 address bytes, `u16 port` (network byte order).
+
+- type 40, introduction request (player -> master, from the player's game socket): header (nonce = the player's
+  lobby nonce), `u8 flags` (0), the game's entry as listed, zero padding: **exactly 128 bytes** (anything else is
+  dropped). Larger than everything it causes, so the master can't be used to amplify traffic.
+- type 41, introduce (master -> host, to the address its heartbeats come from, from the master address they come
+  to): header (the player's version and nonce) + the player's entry: **the address the request came from**, never
+  an address taken from the request. 21 or 33 bytes.
+- type 42, introduction reply (master -> player): header + `u8 status` (0 introduced, 1 unknown game: not
+  registered, another protocol version or another address family; 2 rate limited) + the player's own entry (its
+  public address). 22 or 34 bytes.
+- type 46, your address (master -> host): header + the host's entry as the master sees it, after a heartbeat, at
+  most once a minute per game. With two masters a host can tell whether its NAT keeps one public port for every
+  destination (then punching works) or not.
+
+Only registered games of the same protocol version and address family are introduced. A game on the master's
+own network listed under `--public-ip` is found by its port among the private entries. Limits: 10 requests per
+source (IPv4 address / IPv6 /64) and 40 per IPv6 /48 every 10 s (one status 2 reply, then silence), 30
+introductions per game every 10 s. Nothing is stored per introduction. Games and masters without this ignore the
+four types: a new game with an old master joins directly, as before.
+
+The host's punch (type 43, host -> player, header only with the player's nonce) is the game's own message; see the
+game's docs/IPV6.md / NAT traversal notes.

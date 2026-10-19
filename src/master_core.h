@@ -11,6 +11,11 @@
 // games mixed (32: clear of the game's own message types, which share this header). Plain type 9 requests (the
 // current game) get the type 10 list of before, IPv4 games only; masters without this change ignore the flags byte
 // and answer type 10, so a new browser works with any master.
+// NAT traversal: a player asks from its game socket to be introduced to a listed game (40, exactly 128 bytes: u8
+// flags, the game's entry, zero padding); the game's host gets the player's address as we saw it (41: an entry; the
+// header nonce is the player's) and the player a reply (42: u8 status 0 introduced / 1 unknown game / 2 rate
+// limited, then its own entry). Hosts hear their own public address once a minute (46: an entry, after a
+// heartbeat). Games and masters without this ignore the four types. Entries as in type 32 (family, address, port).
 #include <cstdint>
 #include <functional>
 #include <string>
