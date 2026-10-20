@@ -55,6 +55,11 @@ namespace
     // player. The player gets a reply (42) with its own public address. A host also hears its own public address
     // from us (46) at most once a minute. Nothing is stored per introduction.
     constexpr uint8_t kIntroRequest = 40, kIntroduce = 41, kIntroReply = 42, kSeen = 46;
+    // Relay lobbies (the game's NAT traversal phase 3): a player who can't reach a host sends its pings to relay
+    // servers (48: u8 flags, the game's entry, u8 n <= 16, n x {u64 session id, u16 ms}, zero padding to 256 bytes);
+    // the master passes them on to the host (49: the player's entry as seen, n, the list), like an introduction.
+    constexpr uint8_t kRelayRequest = 48, kRelayNeeded = 49;
+    constexpr size_t kRelayRequestSize = 256, kRelayRtt = 10, kRelayAsk = 16;
     constexpr size_t kIntroRequestSize = 128;  // fixed: larger than all it causes (41 + 42 <= 67 bytes)
     constexpr uint8_t kIntroOk = 0, kIntroUnknown = 1, kIntroLimited = 2;
     constexpr int kIntroBurst = 10, kIntroBurst48 = 4 * kIntroBurst;  // per source and window, like list requests
@@ -534,6 +539,33 @@ int RunMaster(const MasterOptions& options)
                     if (const SockLen toLen = ToSockaddr(game->first, dualStack, to))
                         Send(s, intro, to, toLen, game->second.arrival);
                     reply(kIntroOk);
+                }
+                else if (type == kRelayRequest)
+                {
+                    Address want;
+                    if (n != static_cast<int>(kRelayRequestSize) || !ReadEntry(buf + kHeaderSize + 1, 19, want)) continue;
+                    const uint8_t count = buf[kHeaderSize + 1 + 19];
+                    if (count > kRelayAsk) continue;
+                    if (Count(introRequests[Prefix(key, 64)], now) > kIntroBurst ||
+                        (key.v6 && Count(introRequests48[Prefix(key, 48)], now) > kIntroBurst48))
+                        continue;
+                    // any family: the relay bridges IPv4 and IPv6 players (the host hears it by its heartbeat path)
+                    auto game = games.find(want);
+                    if (game != games.end() && game->second.version != version) game = games.end();
+                    if (game == games.end() && !want.v6 && publicIp && want.ip4 == publicIp)
+                        for (auto g = games.begin(); g != games.end() && game == games.end(); ++g)
+                            if (!g->first.v6 && PrivateAddress(g->first.ip4) && g->first.port == want.port &&
+                                g->second.version == version)
+                                game = g;
+                    if (game == games.end() || Count(game->second.intros, now) > kIntroPerGame) continue;
+                    std::vector<uint8_t> out(buf, buf + kHeaderSize);  // the player's nonce
+                    out[5] = kRelayNeeded;
+                    WriteEntry(out, key);
+                    out.push_back(count);
+                    out.insert(out.end(), buf + kHeaderSize + 1 + 19 + 1, buf + kHeaderSize + 1 + 19 + 1 + count * kRelayRtt);
+                    sockaddr_storage to;
+                    if (const SockLen toLen = ToSockaddr(game->first, dualStack, to))
+                        Send(s, out, to, toLen, game->second.arrival);
                 }
                 else if (type == kUnlist)
                 {
